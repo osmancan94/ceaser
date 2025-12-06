@@ -630,6 +630,10 @@
 
         /* Responsive Design */
         @media (max-width: 768px) {
+            .categories-nav {
+                position: static !important;
+            }
+
             .restaurant-name {
                 font-size: 2.5rem;
             }
@@ -1302,20 +1306,6 @@
             const paymentOptions = document.querySelectorAll('.payment-option');
             const checkoutButton = document.getElementById('checkout-button');
 
- 
-            // QR ve Kart seçeneklerini tamamen devre dışı bırak
-            paymentOptions.forEach(option => {
-                const title = option.querySelector('h3').textContent.trim();
-
-                if (title === "QR ile Ödeme" || title === "Kart ile Ödeme") {
-                    option.classList.add("disabled"); // görünüm için
-                    option.style.pointerEvents = "none"; // tıklanamasın
-                    option.dataset.disabled = "true"; // işaret koy
-                    option.innerHTML += "<p style='color:red;font-weight:bold;'>Pek Yakında Gelecek !</p>";
-                }
-            });
-        
-
             checkoutButton.addEventListener('click', () => {
                 if (cart.length > 0) paymentModal.classList.remove('hidden');
             });
@@ -1325,71 +1315,110 @@
                 if (e.target === paymentModal) paymentModal.classList.add('hidden');
             });
 
+            // --- GEOLOCATION CONSTANTS ---
+            const RESTAURANT_LAT = 35.17887456339262; 
+            const RESTAURANT_LNG = 33.35857531033756;
+            const MAX_DISTANCE_METERS = 100;
+
+            function calculateDistance(lat1, lon1, lat2, lon2) {
+                const R = 6371e3; // Dünya yarıçapı (metre)
+                const φ1 = lat1 * Math.PI / 180;
+                const φ2 = lat2 * Math.PI / 180;
+                const Δφ = (lat2 - lat1) * Math.PI / 180;
+                const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+                const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                          Math.cos(φ1) * Math.cos(φ2) *
+                          Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+                return R * c;
+            }
+
             paymentOptions.forEach(option => {
                 option.addEventListener('click', async () => {
                     const method = option.querySelector('h3').textContent;
                     
-                    // Siparişi Firestore'a kaydet
-                    if (cart.length > 0) {
-                        try {
-                            const items = cart.map(item => ({
-                                id: item.id,
-                                name: item.name,
-                                price: parseFloat(item.price)
-                            }));
+                    if (cart.length === 0) {
+                        paymentModal.classList.add('hidden');
+                        return;
+                    }
 
-                            const total = items.reduce((sum, item) => sum + item.price, 0);
-                            const tableNumber = getTableNumber();
-                            
-                            // Masa numarası zorunlu kontrolü
-                            if (!tableNumber || tableNumber === '1' || tableNumber === null) {
-                                showNotification('Lütfen geçerli bir masa numarası seçin!', 'error');
-                                paymentModal.classList.add('hidden');
-                                return;
+                    // 1. Show Loading
+                    showNotification('Konum doğrulanıyor...', 'success');
+
+                    // 2. Check Geolocation Support
+                    if (!navigator.geolocation) {
+                        showNotification('Tarayıcı konum servisini desteklemiyor.', 'error');
+                        return;
+                    }
+
+                    // 3. Get Position
+                    navigator.geolocation.getCurrentPosition(
+                        async (position) => {
+                            const userLat = position.coords.latitude;
+                            const userLng = position.coords.longitude;
+                            const distance = calculateDistance(userLat, userLng, RESTAURANT_LAT, RESTAURANT_LNG);
+
+                            console.log(`Mesafe: ${distance.toFixed(2)} metre`);
+
+                            // 4. Check Distance
+                            if (distance > MAX_DISTANCE_METERS) {
+                                showNotification(`Restorandan çok uzaktasınız! (${Math.round(distance)}m)`, 'error');
+                                return; // STOP HERE
                             }
-                            
-                            const orderData = {
-                                items,
-                                total,
-                                status: 'Hazırlanıyor',
-                                paid: false,
-                                createdAt: Timestamp.now(),
-                                paymentMethod: method,
-                                source: 'index.html',
-                                tableNumber: parseInt(tableNumber) // Masa numarası zorunlu
-                            };
-                            // Offline ise kuyruğa kaydet
-                            if (!navigator.onLine) {
-                                let pendingOrders = JSON.parse(localStorage.getItem("pendingOrders")) || [];
-                                pendingOrders.push(orderData);
-                                localStorage.setItem("pendingOrders", JSON.stringify(pendingOrders));
 
-                                showNotification("İnternet yok, sipariş kaydedildi!", "error");
-
+                            // 5. Proceed with Order Submission (Only if distance is OK)
+                            try {
+                                const items = cart.map(item => ({
+                                    id: item.id,
+                                    name: item.name,
+                                    price: parseFloat(item.price)
+                                }));
+                                
+                                const total = items.reduce((sum, item) => sum + item.price, 0);
+                                const tableNumber = getTableNumber();
+                                
+                                // Masa numarası zorunlu kontrolü
+                                if (!tableNumber || tableNumber === '1' || tableNumber === null) {
+                                    showNotification('Lütfen geçerli bir masa numarası seçin!', 'error');
+                                    paymentModal.classList.add('hidden');
+                                    return;
+                                }
+                                
+                                const orderData = {
+                                    items,
+                                    total,
+                                    status: 'Hazırlanıyor',
+                                    paid: false,
+                                    createdAt: Timestamp.now(),
+                                    paymentMethod: method,
+                                    source: 'index.html',
+                                    tableNumber: parseInt(tableNumber) // Masa numarası zorunlu
+                                };
+                                
+                                await addDoc(collection(db, 'orders'), orderData);
+                                showNotification(`Siparişiniz alındı! Ödeme: ${method}`, 'success');
+                                
+                                // Sepeti temizle
                                 cart = [];
                                 updateCart();
                                 paymentModal.classList.add('hidden');
-                                return;
+                            } catch (error) {
+                                console.error('Sipariş kaydetme hatası:', error);
+                                let errorMsg = 'Sipariş kaydedilirken bir hata oluştu. Lütfen tekrar deneyin.';
+                                if (error.code === 'permission-denied') {
+                                    errorMsg = 'İzin hatası: Firestore rules güncellenmemiş olabilir.';
+                                }
+                                showNotification(errorMsg, 'error');
                             }
-                            
-                            await addDoc(collection(db, 'orders'), orderData);
-                            showNotification(`Siparişiniz alındı! Ödeme: ${method}`, 'success');
-                            
-                            // Sepeti temizle
-                            cart = [];
-                            updateCart();
-                            paymentModal.classList.add('hidden');
-                        } catch (error) {
-                            console.error('Sipariş kaydetme hatası:', error);
-                            let errorMsg = 'Sipariş kaydedilirken bir hata oluştu. Lütfen tekrar deneyin.';
-                            if (error.code === 'permission-denied') {
-                                errorMsg = 'İzin hatası: Firestore rules güncellenmemiş olabilir.';
-                            }
-                            showNotification(errorMsg, 'error');
-                        }
-                    } else {
-                        paymentModal.classList.add('hidden');
-                    }
+                        },
+                        (error) => {
+                            console.warn("Konum alınamadı:", error);
+                            showNotification('Konum izni vermeden sipariş veremezsiniz.', 'error');
+                        },
+                        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                    );
                 });
             });
         }
@@ -1566,56 +1595,6 @@
         });
     </script>
 
-        <script type="module">
-        import { addDoc, collection } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-
-        // İnternet gelince bekleyen siparişleri gönder
-        window.addEventListener("online", async () => {
-            let pendingOrders = JSON.parse(localStorage.getItem("pendingOrders")) || [];
-            if (pendingOrders.length === 0) return;
-
-            for (let order of pendingOrders) {
-                await addDoc(collection(db, "orders"), order);
-            }
-
-            localStorage.removeItem("pendingOrders");
-            showNotification("Offline alınan siparişler sunucuya gönderildi ✔", "success");
-        });
-        </script>
-
-          <!-- Sanal POS Butonu -->
-    <button id="onlinePaymentBtn" disabled class="disabled-btn">
-    💳 Gerçek Ödeme – Pek Yakında!
-    </button>
-
-    <!-- Kasa'da Öde Butonu (Aktif) -->
-    <button id="cashPaymentBtn">
-    🧾 Kasa'da Öde
-    </button>
-
-    <style>
-    .disabled-btn {
-    background: #ccc;
-    color: #555;
-    cursor: not-allowed;
-    }
-    </style>
-
-  <link rel="manifest" href="manifest.json">
-
-
-    <script>
-    if ("serviceWorker" in navigator) {
-        navigator.serviceWorker.register("service-worker.js");
-    }
-    </script>
-
-    <script>
-if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("service-worker.js");
-}
-</script>
-
 <script>
 let lastScrollY = window.scrollY;
 const nav = document.querySelector('.categories-nav');
@@ -1633,9 +1612,6 @@ window.addEventListener('scroll', () => {
     lastScrollY = currentScrollY;
 });
 </script>
-
-</body>
-</html>
 
 
 </body>

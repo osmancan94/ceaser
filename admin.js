@@ -87,6 +87,9 @@ const createElement = (tag, props = {}, children = []) => {
 // --- GLOBAL DEĞİŞKENLER ---
 let selectedTableId = null;
 let selectedOrderForPayment = null;
+let unsubscribePaymentList = null;
+let unsubscribePaymentDetail = null;
+
 
 // --- DOM ELEMENTLERİ (Hata almamak için güvenli seçim) ---
 const loginForm = document.getElementById('login-form');
@@ -247,13 +250,39 @@ function closeModal(modal) {
 document.querySelectorAll('.close').forEach(closeBtn => {
     closeBtn.addEventListener('click', (e) => {
         const modal = closeBtn.closest('.modal');
+        
+        // Eğer kapanan modal ödeme modalı ise dinleyicileri durdur
+        if (modal.id === 'payment-modal') {
+            if (unsubscribePaymentList) {
+                unsubscribePaymentList();
+                unsubscribePaymentList = null;
+            }
+            if (unsubscribePaymentDetail) {
+                unsubscribePaymentDetail();
+                unsubscribePaymentDetail = null;
+            }
+        }
+
         closeModal(modal);
     });
 });
 
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-        document.querySelectorAll('.modal.active').forEach(modal => closeModal(modal));
+        document.querySelectorAll('.modal.active').forEach(modal => {
+            // Eğer kapanan modal ödeme modalı ise dinleyicileri durdur
+            if (modal.id === 'payment-modal') {
+                if (unsubscribePaymentList) {
+                    unsubscribePaymentList();
+                    unsubscribePaymentList = null;
+                }
+                if (unsubscribePaymentDetail) {
+                    unsubscribePaymentDetail();
+                    unsubscribePaymentDetail = null;
+                }
+            }
+            closeModal(modal);
+        });
     }
 });
 
@@ -298,61 +327,28 @@ if (reportsBtn) {
 if (addProductForm) {
     addProductForm.addEventListener('submit', async (e) => {
         e.preventDefault();
-
         const name = document.getElementById('product-name').value.trim();
         const price = parseFloat(document.getElementById('product-price').value);
         const category = document.getElementById('product-category').value;
-
-        const imageUrlInput = document.getElementById("product-image").value.trim();
-        const fileInput = document.getElementById("product-image-file");
-
-        let finalImageUrl = ""; // Resim zorunlu değil
-
-        // Eğer URL girilmişse onu al
-        if (imageUrlInput !== "") {
-            finalImageUrl = imageUrlInput;
-        }
-
-        // Eğer PNG/JPG dosya seçilmişse onu base64 olarak al
-        if (fileInput && fileInput.files.length > 0) {
-            const file = fileInput.files[0];
-            const reader = new FileReader();
-
-            await new Promise((resolve) => {
-                reader.onload = () => {
-                    finalImageUrl = reader.result;
-                    resolve();
-                };
-                reader.readAsDataURL(file);
-            });
-        }
-
         const submitBtn = addProductForm.querySelector('button[type="submit"]');
-        submitBtn.disabled = true;
 
+        submitBtn.disabled = true;
         try {
             await addDoc(collection(db, 'menuItems'), {
-                name,
-                price,
-                category,
+                name, price, category,
                 ingredients: document.getElementById('product-ingredients').value.trim() || '',
-                image: finalImageUrl || null,
+                image: document.getElementById('product-image').value.trim() || '',
                 createdAt: Timestamp.now()
             });
-
             addProductForm.reset();
             showNotification('Ürün eklendi!', 'success');
-
         } catch (error) {
-            console.error(error);
             showNotification('Hata oluştu', 'error');
-
         } finally {
             submitBtn.disabled = false;
         }
     });
 }
-
 
 function loadMenuItems() {
     if (!menuItemsList) return;
@@ -759,41 +755,56 @@ function loadPayments() {
 async function loadPaymentTables() {
     const list = document.getElementById('payment-tables-list');
     if (!list) return;
+    
+    // Eğer önceki bir dinleyici varsa kapat
+    if (unsubscribePaymentList) {
+        unsubscribePaymentList();
+        unsubscribePaymentList = null;
+    }
+
     list.innerHTML = 'Yükleniyor...';
     
-    const ordersSnap = await getDocs(query(collection(db, 'orders'), where('paid', '==', false)));
-    const tableOrders = {};
-    ordersSnap.forEach(doc => {
-        const o = doc.data();
-        if (o.tableNumber) {
-            if (!tableOrders[o.tableNumber]) tableOrders[o.tableNumber] = { total: 0, count: 0 };
-            tableOrders[o.tableNumber].total += o.total || 0;
-            tableOrders[o.tableNumber].count++;
-        }
-    });
-    
+    // Masaları bir kere çek (Masalar sık değişmez, ama siparişler değişir)
     const tablesSnap = await getDocs(query(collection(db, 'tables'), orderBy('number')));
-    list.innerHTML = '';
+    const tables = [];
+    tablesSnap.forEach(doc => tables.push(doc.data()));
+
+    // Siparişleri dinle
+    const q = query(collection(db, 'orders'), where('paid', '==', false));
     
-    tablesSnap.forEach(doc => {
-        const t = doc.data();
-        const info = tableOrders[t.number];
+    unsubscribePaymentList = onSnapshot(q, (snapshot) => {
+        const tableOrders = {};
         
-        const div = createElement('div', {
-            style: `padding:15px; border-radius:8px; background:${info ? '#fef3c7' : '#f3f4f6'}; border:2px solid ${info ? '#f59e0b' : '#eee'}; cursor:pointer; text-align:center;`,
-            onclick: () => {
-                if(info) showTableOrdersForPayment(t.number);
-                else showNotification('Ödeme yok', 'success');
+        snapshot.forEach(doc => {
+            const o = doc.data();
+            if (o.tableNumber) {
+                if (!tableOrders[o.tableNumber]) tableOrders[o.tableNumber] = { total: 0, count: 0 };
+                tableOrders[o.tableNumber].total += o.total || 0;
+                tableOrders[o.tableNumber].count++;
             }
         });
+
+        list.innerHTML = '';
         
-        div.innerHTML = `<strong>Masa ${t.number}</strong><br>`;
-        if (info) {
-            div.innerHTML += `<span style="color:#e53e3e; font-weight:bold;">${info.total.toFixed(2)} TL</span><br><small>${info.count} Sipariş</small>`;
-        } else {
-            div.innerHTML += `<small>Boş</small>`;
-        }
-        list.appendChild(div);
+        tables.forEach(t => {
+            const info = tableOrders[t.number];
+            
+            const div = createElement('div', {
+                style: `padding:15px; border-radius:8px; background:${info ? '#fef3c7' : '#f3f4f6'}; border:2px solid ${info ? '#f59e0b' : '#eee'}; cursor:pointer; text-align:center;`,
+                onclick: () => {
+                    if(info) showTableOrdersForPayment(t.number);
+                    else showNotification('Ödeme yok', 'success');
+                }
+            });
+            
+            div.innerHTML = `<strong>Masa ${t.number}</strong><br>`;
+            if (info) {
+                div.innerHTML += `<span style="color:#e53e3e; font-weight:bold;">${info.total.toFixed(2)} TL</span><br><small>${info.count} Sipariş</small>`;
+            } else {
+                div.innerHTML += `<small>Boş</small>`;
+            }
+            list.appendChild(div);
+        });
     });
 }
 // masanın ödenmemiş siparişlerini listelediği bölüm
@@ -805,75 +816,97 @@ async function showTableOrdersForPayment(tableNumber) {
     document.getElementById('selected-table-title').textContent = `Masa #${tableNumber} Ödeme`;
     const list = document.getElementById('table-orders-for-payment');
     list.innerHTML = 'Yükleniyor...';
+
+    // Eğer önceki detay dinleyicisi varsa kapat
+    if (unsubscribePaymentDetail) {
+        unsubscribePaymentDetail();
+        unsubscribePaymentDetail = null;
+    }
     
     const q = query(collection(db, 'orders'), where('tableNumber', '==', tableNumber), where('paid', '==', false));
-    const snap = await getDocs(q);
     
-    list.innerHTML = '';
-    let grandTotal = 0;
-    const orders = [];
-    
-    snap.forEach(doc => {
-        const o = { id: doc.id, ...doc.data() };
-        orders.push(o);
-        grandTotal += o.total || 0;
+    unsubscribePaymentDetail = onSnapshot(q, (snap) => {
+        list.innerHTML = '';
+        let grandTotal = 0;
+        const orders = [];
         
-        const div = createElement('div', { 
-    style: 'background:white; padding:10px; margin-bottom:10px; border-radius:5px; border:1px solid #ddd;' 
+        if (snap.empty) {
+            list.innerHTML = '<p>Ödenecek sipariş kalmadı.</p>';
+            // Eğer sipariş kalmadıysa geri dön butonu dışında işlem yapılamaz
+             document.getElementById('back-to-tables').onclick = () => {
+                if (unsubscribePaymentDetail) {
+                    unsubscribePaymentDetail();
+                    unsubscribePaymentDetail = null;
+                }
+                detailSec.style.display = 'none';
+                document.getElementById('payment-tables-list').style.display = 'grid';
+            };
+            return;
+        }
 
-    
+        snap.forEach(doc => {
+            const o = { id: doc.id, ...doc.data() };
+            orders.push(o);
+            grandTotal += o.total || 0;
+            
+            const div = createElement('div', { 
+                style: 'background:white; padding:10px; margin-bottom:10px; border-radius:5px; border:1px solid #ddd;' 
+            });
 
-});
+            // ÜRÜNLERİ HTML'e dönüştür
+            const itemsHTML = o.items.map((it, index) => `
+                <div style="font-size:13px; color:#444; margin-left:10px; display:flex; justify-content:space-between; align-items:center;">
+                    <span>• ${it.name} (${it.price} TL)</span>
 
-// ÜRÜNLERİ HTML'e dönüştür
-const itemsHTML = o.items.map((it, index) => `
-    <div style="font-size:13px; color:#444; margin-left:10px; display:flex; justify-content:space-between; align-items:center;">
-        <span>• ${it.name} (${it.price} TL)</span>
-
-        <button onclick="cancelOrderItem('${o.id}', ${index})"
-            style="background:#ef4444; color:white; border:none; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:12px;">
-            İptal Et
-        </button>
-    </div>
-`).join("");
+                    <button onclick="cancelOrderItem('${o.id}', ${index})"
+                        style="background:#ef4444; color:white; border:none; padding:3px 8px; border-radius:4px; cursor:pointer; font-size:12px;">
+                        İptal Et
+                    </button>
+                </div>
+            `).join("");
 
 
-div.innerHTML = `
-    <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
-        <strong>Sipariş</strong>
-        <span style="font-weight:bold;">${(o.total||0).toFixed(2)} TL</span>
-    </div>
+            div.innerHTML = `
+                <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
+                    <strong>Sipariş</strong>
+                    <span style="font-weight:bold;">${(o.total||0).toFixed(2)} TL</span>
+                </div>
 
-    <div style="margin:5px 0 10px 0;">
-        ${itemsHTML}
-    </div>
+                <div style="margin:5px 0 10px 0;">
+                    ${itemsHTML}
+                </div>
 
-    <button onclick="selectOrderForPayment('${o.id}', ${o.total})"
-        style="width:100%; margin-top:5px; background:#3b82f6; color:white; border:none; padding:5px; border-radius:3px; cursor:pointer;">
-        Bu Siparişi Öde
-    </button>
-`;
+                <button onclick="selectOrderForPayment('${o.id}', ${o.total})"
+                    style="width:100%; margin-top:5px; background:#3b82f6; color:white; border:none; padding:5px; border-radius:3px; cursor:pointer;">
+                    Bu Siparişi Öde
+                </button>
+            `;
 
-        list.appendChild(div);
+            list.appendChild(div);
+        });
+        
+        const payAllBtn = createElement('button', {
+            textContent: `TÜMÜNÜ ÖDE (${grandTotal.toFixed(2)} TL)`,
+            style: 'width:100%; padding:15px; background:#10b981; color:white; border:none; border-radius:5px; font-weight:bold; font-size:16px; margin-top:10px; cursor:pointer;',
+            onclick: () => openFullPayment(tableNumber, grandTotal, orders)
+        });
+        list.appendChild(payAllBtn);
+
+        // --- ADİSYON YAZDIR BUTONU ---
+        const printAdisyonBtn = createElement("button", {
+            textContent: "🧾 Adisyon Yazdır",
+            style: "width:100%; padding:15px; background:#3b82f6; color:white; border:none; border-radius:5px; font-weight:bold; font-size:16px; margin-top:10px; cursor:pointer;",
+            onclick: () => printAdisyon(tableNumber, orders)
+        });
+        list.appendChild(printAdisyonBtn);
     });
-    
-    const payAllBtn = createElement('button', {
-        textContent: `TÜMÜNÜ ÖDE (${grandTotal.toFixed(2)} TL)`,
-        style: 'width:100%; padding:15px; background:#10b981; color:white; border:none; border-radius:5px; font-weight:bold; font-size:16px; margin-top:10px; cursor:pointer;',
-        onclick: () => openFullPayment(tableNumber, grandTotal, orders)
-    });
-    list.appendChild(payAllBtn);
-
-    // --- ADİSYON YAZDIR BUTONU ---
-const printAdisyonBtn = createElement("button", {
-    textContent: "🧾 Adisyon Yazdır",
-    style: "width:100%; padding:15px; background:#3b82f6; color:white; border:none; border-radius:5px; font-weight:bold; font-size:16px; margin-top:10px; cursor:pointer;",
-    onclick: () => printAdisyon(tableNumber, orders)
-});
-list.appendChild(printAdisyonBtn);
 
     
     document.getElementById('back-to-tables').onclick = () => {
+        if (unsubscribePaymentDetail) {
+            unsubscribePaymentDetail();
+            unsubscribePaymentDetail = null;
+        }
         detailSec.style.display = 'none';
         document.getElementById('payment-tables-list').style.display = 'grid';
     };
