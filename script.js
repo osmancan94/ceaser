@@ -260,8 +260,58 @@ function updateMenuFunctionality() {
     const closePaymentModal = document.getElementById('close-payment-modal');
     const paymentOptions = document.querySelectorAll('.payment-option');
 
+    // --- GEOLOCATION SECURITY ---
+    const RESTAURANT_LAT = 35.17887456339262; // 
+    const RESTAURANT_LNG = 33.35857531033756;
+    const MAX_DISTANCE_METERS = 100;
+
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371e3; // Dünya yarıçapı (metre)
+        const φ1 = lat1 * Math.PI / 180;
+        const φ2 = lat2 * Math.PI / 180;
+        const Δφ = (lat2 - lat1) * Math.PI / 180;
+        const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+        const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                  Math.cos(φ1) * Math.cos(φ2) *
+                  Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+        return R * c;
+    }
+
     checkoutButton.addEventListener('click', () => {
-        if (cart.length > 0) paymentModal.classList.remove('hidden');
+        if (cart.length === 0) return;
+
+        showNotification('Konum kontrol ediliyor...', 'success');
+
+        if (!navigator.geolocation) {
+            showNotification('Tarayıcı konum servisini desteklemiyor. Devam ediliyor...', 'error');
+            paymentModal.classList.remove('hidden');
+            return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const userLat = position.coords.latitude;
+                const userLng = position.coords.longitude;
+                const distance = calculateDistance(userLat, userLng, RESTAURANT_LAT, RESTAURANT_LNG);
+
+                console.log(`Mesafe: ${distance.toFixed(2)} metre`);
+
+                if (distance <= MAX_DISTANCE_METERS) {
+                    paymentModal.classList.remove('hidden');
+                } else {
+                    showNotification(`Sipariş verebilmek için restoranda olmalısınız! (Mesafe: ${Math.round(distance)}m)`, 'error');
+                }
+            },
+            (error) => {
+                console.warn("Konum alınamadı:", error);
+                showNotification('Konum alınamadı. Lütfen garsona bilgi veriniz. İşleme devam ediliyor...', 'error');
+                paymentModal.classList.remove('hidden');
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
     });
 
     closePaymentModal.addEventListener('click', () => paymentModal.classList.add('hidden'));
